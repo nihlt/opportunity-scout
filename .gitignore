@@ -1,0 +1,7 @@
+node_modules/
+materials/
+data/events.jsonl
+data/events.current.json
+data/state.json
+.env
+npm-debug.log*

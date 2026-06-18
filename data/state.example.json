@@ -1,0 +1,21 @@
+{
+  "lastRunAt": "2026-06-18T00:00:00.000Z",
+  "lastNormalizeAt": "2026-06-18T00:00:00.000Z",
+  "totalEvents": 1,
+  "sourceStats": [
+    {
+      "id": "example-source",
+      "name": "Example Source",
+      "eventCount": 1,
+      "sourceEventFile": "materials/example-events.json",
+      "scrapedAt": "2026-06-18T00:00:00.000Z"
+    }
+  ],
+  "lastChanges": {
+    "newEventIds": ["example-event-id"],
+    "updatedEventIds": [],
+    "disappearedEventIds": []
+  },
+  "sentTelegramEventIds": [],
+  "lastTelegramDigestAt": null
+}

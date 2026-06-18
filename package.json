@@ -1,0 +1,19 @@
+{
+  "name": "opps-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "scrape": "node scripts/scrape-sources.mjs",
+    "scrape:all": "node scripts/scrape-sources.mjs",
+    "scrape:dou-ai": "node scripts/scrape-sources.mjs dou-ai",
+    "scrape:ain": "node scripts/scrape-sources.mjs ain-opportunities-week",
+    "scrape:kaggle": "node scripts/scrape-sources.mjs kaggle-competitions",
+    "normalize": "node scripts/normalize-events.mjs",
+    "pipeline": "npm run scrape && npm run normalize",
+    "events": "node scripts/events-cli.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.53.1"
+  }
+}
