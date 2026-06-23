@@ -14,7 +14,8 @@
     "events": "node scripts/events-cli.mjs",
     "digest:dry": "node scripts/send-telegram-digest.mjs --dry-run",
     "digest": "node scripts/send-telegram-digest.mjs",
-    "daily": "npm run scrape && npm run normalize && npm run digest"
+    "daily": "npm run scrape && npm run normalize && npm run digest",
+    "prefs": "node scripts/preferences-cli.mjs"
   },
   "dependencies": {
     "playwright": "^1.53.1"
