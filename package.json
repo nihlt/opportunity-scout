@@ -11,7 +11,10 @@
     "scrape:kaggle": "node scripts/scrape-sources.mjs kaggle-competitions",
     "normalize": "node scripts/normalize-events.mjs",
     "pipeline": "npm run scrape && npm run normalize",
-    "events": "node scripts/events-cli.mjs"
+    "events": "node scripts/events-cli.mjs",
+    "digest:dry": "node scripts/send-telegram-digest.mjs --dry-run",
+    "digest": "node scripts/send-telegram-digest.mjs",
+    "daily": "npm run scrape && npm run normalize && npm run digest"
   },
   "dependencies": {
     "playwright": "^1.53.1"
