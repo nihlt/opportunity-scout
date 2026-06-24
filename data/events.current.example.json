@@ -13,6 +13,7 @@
       "description": "Short normalized event description.",
       "location": "Online",
       "payment": null,
+      "calendar": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Example+event&dates=20260618%2F20260619&details=Short+normalized+event+description.%0ASource%3A+Example+Source%0ATags%3A+AI%0ALink%3A+https%3A%2F%2Fexample.com%2Fevent&location=Online",
       "tags": ["AI"],
       "sourceId": "example-source",
       "sourceName": "Example Source",

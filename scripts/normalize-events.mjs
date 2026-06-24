@@ -44,6 +44,100 @@ function contentHash(event) {
   return createHash('sha256').update(JSON.stringify(comparable), 'utf8').digest('hex');
 }
 
+function truncate(text, maxLength = 260) {
+  if (!text) return '';
+  const clean = String(text).replace(/\s+/g, ' ').trim();
+  if (clean.length <= maxLength) return clean;
+  return `${clean.slice(0, maxLength - 1).trimEnd()}...`;
+}
+
+function parseNormalizedDate(value) {
+  if (!value || typeof value !== 'string') return null;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!match) return null;
+
+  const [, year, month, day, hour = '00', minute = '00', second = '00'] = match;
+  const date = new Date(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  );
+
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function addHours(date, hours) {
+  const next = new Date(date);
+  next.setHours(next.getHours() + hours);
+  return next;
+}
+
+function pad2(value) {
+  return String(value).padStart(2, '0');
+}
+
+function calendarDate(date) {
+  return `${date.getFullYear()}${pad2(date.getMonth() + 1)}${pad2(date.getDate())}`;
+}
+
+function calendarDateTime(date) {
+  return `${calendarDate(date)}T${pad2(date.getHours())}${pad2(date.getMinutes())}${pad2(date.getSeconds())}`;
+}
+
+function calendarDates(event) {
+  if (!event.dateNormalized) return null;
+
+  if (event.datePrecision === 'date') {
+    const start = parseNormalizedDate(event.dateNormalized);
+    if (!start) return null;
+    return `${calendarDate(start)}/${calendarDate(addDays(start, 1))}`;
+  }
+
+  if (event.datePrecision === 'date_range') {
+    const start = parseNormalizedDate(event.dateNormalized);
+    const end = parseNormalizedDate(event.dateEndNormalized) || start;
+    if (!start || !end) return null;
+    return `${calendarDate(start)}/${calendarDate(addDays(end, 1))}`;
+  }
+
+  if (event.datePrecision === 'datetime') {
+    const start = parseNormalizedDate(event.dateNormalized);
+    if (!start) return null;
+    return `${calendarDateTime(start)}/${calendarDateTime(addHours(start, 1))}`;
+  }
+
+  return null;
+}
+
+function buildCalendarLink(event) {
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: event.title || 'Opportunity',
+  });
+  const dates = calendarDates(event);
+  if (dates) params.set('dates', dates);
+
+  const details = [
+    truncate(event.description, 180),
+    event.sourceName ? `Source: ${event.sourceName}` : null,
+    event.tags?.length ? `Tags: ${event.tags.join(', ')}` : null,
+    event.link ? `Link: ${event.link}` : null,
+  ].filter(Boolean).join('\n');
+  if (details) params.set('details', details);
+  if (event.location) params.set('location', event.location);
+
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
 async function readJson(filePath, fallback) {
   try {
     return JSON.parse(await readFile(filePath, 'utf8'));
@@ -72,7 +166,7 @@ function normalizeEvent(source, sourceEvent, index, observedAt) {
   const link = cleanText(sourceEvent.link);
   const id = stableId(source.id, link, title);
 
-  return {
+  const normalized = {
     id,
     title,
     link,
@@ -94,6 +188,11 @@ function normalizeEvent(source, sourceEvent, index, observedAt) {
     sourceEventIndex: index,
     firstSeenAt: observedAt,
     lastSeenAt: observedAt,
+  };
+
+  return {
+    ...normalized,
+    calendar: buildCalendarLink(normalized),
   };
 }
 

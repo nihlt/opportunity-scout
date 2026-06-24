@@ -96,99 +96,6 @@ function formatDate(event) {
   return event.dateNormalized || event.date || '—';
 }
 
-function parseNormalizedDate(value) {
-  if (!value || typeof value !== 'string') return null;
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
-  if (!match) return null;
-
-  const [, year, month, day, hour = '00', minute = '00', second = '00'] = match;
-  const date = new Date(
-    Number(year),
-    Number(month) - 1,
-    Number(day),
-    Number(hour),
-    Number(minute),
-    Number(second),
-  );
-
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function addDays(date, days) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-function addHours(date, hours) {
-  const next = new Date(date);
-  next.setHours(next.getHours() + hours);
-  return next;
-}
-
-function padDatePart(value) {
-  return String(value).padStart(2, '0');
-}
-
-function formatCalendarDate(date) {
-  return [
-    date.getFullYear(),
-    padDatePart(date.getMonth() + 1),
-    padDatePart(date.getDate()),
-  ].join('');
-}
-
-function formatCalendarDateTime(date) {
-  return `${formatCalendarDate(date)}T${padDatePart(date.getHours())}${padDatePart(date.getMinutes())}${padDatePart(date.getSeconds())}`;
-}
-
-function calendarDateRange(event) {
-  if (!event.dateNormalized) return null;
-
-  if (event.datePrecision === 'date') {
-    const start = parseNormalizedDate(event.dateNormalized);
-    if (!start) return null;
-    return `${formatCalendarDate(start)}/${formatCalendarDate(addDays(start, 1))}`;
-  }
-
-  if (event.datePrecision === 'date_range') {
-    const start = parseNormalizedDate(event.dateNormalized);
-    const end = parseNormalizedDate(event.dateEndNormalized) || start;
-    if (!start || !end) return null;
-    return `${formatCalendarDate(start)}/${formatCalendarDate(addDays(end, 1))}`;
-  }
-
-  if (event.datePrecision === 'datetime') {
-    const start = parseNormalizedDate(event.dateNormalized);
-    if (!start) return null;
-    return `${formatCalendarDateTime(start)}/${formatCalendarDateTime(addHours(start, 1))}`;
-  }
-
-  return null;
-}
-
-function buildGoogleCalendarLink(event) {
-  const dates = calendarDateRange(event);
-  if (!dates) return null;
-
-  const details = [
-    truncate(event.description, 180),
-    event.sourceName ? `Source: ${event.sourceName}` : null,
-    event.tags?.length ? `Tags: ${event.tags.join(', ')}` : null,
-    event.link ? `Link: ${event.link}` : null,
-  ].filter(Boolean).join('\n');
-
-  const params = new URLSearchParams({
-    action: 'TEMPLATE',
-    text: event.title || 'Opportunity',
-    dates,
-    details,
-  });
-
-  if (event.location) params.set('location', event.location);
-  return `https://calendar.google.com/calendar/render?${params.toString()}`;
-}
-
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -214,9 +121,8 @@ function filterDigestEvents(events) {
 }
 
 function formatEvent(event, index) {
-  const calendarLink = buildGoogleCalendarLink(event);
   const lines = [
-    `${index}. <a href="${escapeHtml(event.link)}">${escapeHtml(event.title)}</a>${calendarLink ? ` | <a href="${escapeHtml(calendarLink)}">calendar</a>` : ''}`,
+    `${index}. <a href="${escapeHtml(event.link)}">${escapeHtml(event.title)}</a>${event.calendar ? ` | <a href="${escapeHtml(event.calendar)}">calendar</a>` : ''}`,
     `Date: ${escapeHtml(formatDate(event))}`,
     `Source: ${escapeHtml(event.sourceName || event.sourceId)}`,
   ];
