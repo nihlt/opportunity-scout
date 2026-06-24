@@ -6,28 +6,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 const defaultEventsPath = path.join(repoRoot, 'data', 'events.jsonl');
 const defaultStatePath = path.join(repoRoot, 'data', 'state.json');
-const defaultPreferencesPath = path.join(repoRoot, 'data', 'preferences.json');
 const telegramLimit = 4096;
 const safeMessageLimit = 3600;
-const preferenceStopWords = new Set([
-  'and',
-  'are',
-  'for',
-  'from',
-  'the',
-  'with',
-  'you',
-  '\u0430\u0431\u043e',
-  '\u0432\u0456\u0434',
-  '\u0434\u043b\u044f',
-  '\u0437\u0430',
-  '\u043d\u0430',
-  '\u043f\u0440\u043e',
-  '\u0442\u0430',
-  '\u0443',
-  '\u0443\u0441\u0456',
-  '\u0449\u043e',
-]);
 
 function parseArgs(argv) {
   const args = {
@@ -37,7 +17,6 @@ function parseArgs(argv) {
     envFile: path.join(repoRoot, '.env'),
     eventsFile: defaultEventsPath,
     stateFile: defaultStatePath,
-    preferencesFile: defaultPreferencesPath,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -48,7 +27,6 @@ function parseArgs(argv) {
     else if (arg === '--env-file') args.envFile = path.resolve(repoRoot, argv[++index]);
     else if (arg === '--events-file') args.eventsFile = path.resolve(repoRoot, argv[++index]);
     else if (arg === '--state-file') args.stateFile = path.resolve(repoRoot, argv[++index]);
-    else if (arg === '--preferences-file') args.preferencesFile = path.resolve(repoRoot, argv[++index]);
   }
 
   if (args.last !== null && (!Number.isInteger(args.last) || args.last <= 0)) {
@@ -91,72 +69,13 @@ async function readState(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'));
 }
 
-async function readPreferences(filePath) {
-  try {
-    const preferences = JSON.parse(await readFile(filePath, 'utf8'));
-    return {
-      words: preferences.words || {},
-      eventFeedback: preferences.eventFeedback || {},
-      lastUpdatedAt: preferences.lastUpdatedAt || null,
-    };
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      return { words: {}, eventFeedback: {}, lastUpdatedAt: null };
-    }
-    throw error;
-  }
-}
-
-async function writePreferences(filePath, preferences) {
-  await writeFile(filePath, JSON.stringify(preferences, null, 2) + '\n', 'utf8');
-}
-
 function isAiEvent(event) {
-  return event.tags.some((tag) => tag.toLowerCase() === 'ai');
+  return (event.tags || []).some((tag) => tag.toLowerCase() === 'ai');
 }
 
-function preferenceScore(event, preferences) {
-  const text = [event.title, event.description, event.tags?.join(' ')].filter(Boolean).join('\n').toLowerCase();
-  let score = Number(preferences.eventFeedback?.[event.id] || 0);
-
-  for (const [word, value] of Object.entries(preferences.words || {})) {
-    if (word && text.includes(word.toLowerCase())) {
-      score += Number(value) || 0;
-    }
-  }
-
-  return score;
-}
-
-function extractPreferenceTerms(event) {
-  const rawText = [event.title, event.tags?.join(' ')].filter(Boolean).join(' ').toLowerCase();
-  const terms = new Set();
-
-  for (const match of rawText.matchAll(/[\p{L}\p{N}][\p{L}\p{N}_+-]*/gu)) {
-    const term = match[0].trim();
-    if (term.length < 2 || preferenceStopWords.has(term)) continue;
-    terms.add(term);
-  }
-
-  return [...terms];
-}
-
-function applyEventFeedback(preferences, event, eventId, delta) {
-  preferences.eventFeedback[eventId] = (Number(preferences.eventFeedback[eventId]) || 0) + delta;
-
-  if (!event) return;
-  for (const term of extractPreferenceTerms(event)) {
-    preferences.words[term] = (Number(preferences.words[term]) || 0) + delta;
-    if (preferences.words[term] === 0) delete preferences.words[term];
-  }
-}
-
-function compareDigestEvents(a, b, preferences = {}) {
+function compareDigestEvents(a, b) {
   const aiDelta = Number(isAiEvent(b)) - Number(isAiEvent(a));
   if (aiDelta) return aiDelta;
-
-  const scoreDelta = preferenceScore(b, preferences) - preferenceScore(a, preferences);
-  if (scoreDelta) return scoreDelta;
 
   const dateA = a.dateNormalized || '9999-99-99T99:99:99';
   const dateB = b.dateNormalized || '9999-99-99T99:99:99';
@@ -174,7 +93,100 @@ function formatDate(event) {
   if (event.datePrecision === 'date_range' && event.dateNormalized && event.dateEndNormalized) {
     return `${event.dateNormalized} - ${event.dateEndNormalized}`;
   }
-  return event.dateNormalized || event.date || 'date unknown';
+  return event.dateNormalized || event.date || '—';
+}
+
+function parseNormalizedDate(value) {
+  if (!value || typeof value !== 'string') return null;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!match) return null;
+
+  const [, year, month, day, hour = '00', minute = '00', second = '00'] = match;
+  const date = new Date(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  );
+
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function addHours(date, hours) {
+  const next = new Date(date);
+  next.setHours(next.getHours() + hours);
+  return next;
+}
+
+function padDatePart(value) {
+  return String(value).padStart(2, '0');
+}
+
+function formatCalendarDate(date) {
+  return [
+    date.getFullYear(),
+    padDatePart(date.getMonth() + 1),
+    padDatePart(date.getDate()),
+  ].join('');
+}
+
+function formatCalendarDateTime(date) {
+  return `${formatCalendarDate(date)}T${padDatePart(date.getHours())}${padDatePart(date.getMinutes())}${padDatePart(date.getSeconds())}`;
+}
+
+function calendarDateRange(event) {
+  if (!event.dateNormalized) return null;
+
+  if (event.datePrecision === 'date') {
+    const start = parseNormalizedDate(event.dateNormalized);
+    if (!start) return null;
+    return `${formatCalendarDate(start)}/${formatCalendarDate(addDays(start, 1))}`;
+  }
+
+  if (event.datePrecision === 'date_range') {
+    const start = parseNormalizedDate(event.dateNormalized);
+    const end = parseNormalizedDate(event.dateEndNormalized) || start;
+    if (!start || !end) return null;
+    return `${formatCalendarDate(start)}/${formatCalendarDate(addDays(end, 1))}`;
+  }
+
+  if (event.datePrecision === 'datetime') {
+    const start = parseNormalizedDate(event.dateNormalized);
+    if (!start) return null;
+    return `${formatCalendarDateTime(start)}/${formatCalendarDateTime(addHours(start, 1))}`;
+  }
+
+  return null;
+}
+
+function buildGoogleCalendarLink(event) {
+  const dates = calendarDateRange(event);
+  if (!dates) return null;
+
+  const details = [
+    truncate(event.description, 180),
+    event.sourceName ? `Source: ${event.sourceName}` : null,
+    event.tags?.length ? `Tags: ${event.tags.join(', ')}` : null,
+    event.link ? `Link: ${event.link}` : null,
+  ].filter(Boolean).join('\n');
+
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: event.title || 'Opportunity',
+    dates,
+    details,
+  });
+
+  if (event.location) params.set('location', event.location);
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
 }
 
 function escapeHtml(value) {
@@ -202,14 +214,14 @@ function filterDigestEvents(events) {
 }
 
 function formatEvent(event, index) {
+  const calendarLink = buildGoogleCalendarLink(event);
   const lines = [
-    `${index}. <a href="${escapeHtml(event.link)}">${escapeHtml(event.title)}</a>`,
+    `${index}. <a href="${escapeHtml(event.link)}">${escapeHtml(event.title)}</a>${calendarLink ? ` | <a href="${escapeHtml(calendarLink)}">calendar</a>` : ''}`,
     `Date: ${escapeHtml(formatDate(event))}`,
     `Source: ${escapeHtml(event.sourceName || event.sourceId)}`,
   ];
 
   if (event.tags?.length) lines.push(`Tags: ${escapeHtml(event.tags.join(', '))}`);
-  if (event.payment) lines.push(`Payment: ${escapeHtml(event.payment)}`);
   if (event.description) lines.push(escapeHtml(truncate(event.description)));
   return lines.join('\n');
 }
@@ -251,9 +263,7 @@ function lastEvents(events, count) {
 }
 
 function selectEventsToSend(events, state, args) {
-  if (args.last !== null) {
-    return lastEvents(events, args.last);
-  }
+  if (args.last !== null) return lastEvents(events, args.last);
   return pendingEvents(events, state);
 }
 
@@ -298,100 +308,6 @@ async function sendTelegramMessage(text) {
   return payload.result;
 }
 
-async function setMessageReaction(chatId, messageId, emoji = '\u{1F44D}') {
-  await callTelegram('setMessageReaction', {
-    chat_id: chatId,
-    message_id: messageId,
-    reaction: [{ type: 'emoji', emoji }],
-  }).catch((error) => {
-    console.warn(`Could not set feedback reaction: ${error.message}`);
-  });
-}
-
-async function getUpdates(state) {
-  const payload = {
-    timeout: 0,
-    allowed_updates: ['message'],
-  };
-
-  if (Number.isInteger(state.telegramUpdateOffset)) {
-    payload.offset = state.telegramUpdateOffset;
-  }
-
-  const response = await callTelegram('getUpdates', payload);
-  return Array.isArray(response.result) ? response.result : [];
-}
-
-function feedbackDelta(markers) {
-  if (markers === '++') return 2;
-  if (markers === '+') return 1;
-  if (markers === '--') return -2;
-  if (markers === '-') return -1;
-  return 0;
-}
-
-function parseFeedbackText(text) {
-  const feedback = [];
-  for (const line of String(text || '').split(/\r?\n/)) {
-    const match = line.trim().match(/^(\d+)\s*(\+\+|--|\+|-)$/);
-    if (match) {
-      feedback.push({ number: Number(match[1]), delta: feedbackDelta(match[2]) });
-    }
-  }
-  return feedback;
-}
-
-function digestMessageMappings(state) {
-  const mappings = new Map();
-  for (const digestMessage of state.lastTelegramDigestMessages || []) {
-    const messageId = digestMessage.messageId;
-    if (!messageId) continue;
-    mappings.set(messageId, new Map((digestMessage.events || []).map((event) => [event.number, event.eventId])));
-  }
-  return mappings;
-}
-
-async function processFeedbackUpdates(state, preferences, { dryRun = false, eventsById = new Map() } = {}) {
-  const updates = await getUpdates(state);
-  const mappings = digestMessageMappings(state);
-  let maxUpdateId = Number.isInteger(state.telegramUpdateOffset) ? state.telegramUpdateOffset - 1 : -1;
-  let feedbackCount = 0;
-
-  for (const update of updates) {
-    if (Number.isInteger(update.update_id)) maxUpdateId = Math.max(maxUpdateId, update.update_id);
-
-    const message = update.message;
-    if (!message || String(message.chat?.id) !== String(process.env.TELEGRAM_CHAT_ID)) continue;
-    const repliedMessageId = message.reply_to_message?.message_id;
-    if (!mappings.has(repliedMessageId)) continue;
-
-    const parsed = parseFeedbackText(message.text);
-    if (!parsed.length) continue;
-
-    const numberToEventId = mappings.get(repliedMessageId);
-    for (const item of parsed) {
-      const eventId = numberToEventId.get(item.number);
-      if (!eventId) continue;
-      applyEventFeedback(preferences, eventsById.get(eventId), eventId, item.delta);
-      feedbackCount += 1;
-    }
-
-    if (!dryRun) {
-      await setMessageReaction(message.chat.id, message.message_id);
-    }
-  }
-
-  if (maxUpdateId >= 0) {
-    state.telegramUpdateOffset = maxUpdateId + 1;
-  }
-
-  if (feedbackCount) {
-    preferences.lastUpdatedAt = new Date().toISOString();
-  }
-
-  return { feedbackCount, updateCount: updates.length };
-}
-
 async function updateState(filePath, state, sentEvents, sentMessages) {
   const previousSentIds = Array.isArray(state.sentTelegramEventIds) ? state.sentTelegramEventIds : [];
   const sentTelegramEventIds = [...new Set([...previousSentIds, ...sentEvents.map((event) => event.id)])];
@@ -413,30 +329,16 @@ async function main() {
 
   const events = await readEvents(args.eventsFile);
   const state = await readState(args.stateFile);
-  const preferences = await readPreferences(args.preferencesFile);
-  const eventsById = new Map(events.map((event) => [event.id, event]));
 
-  const needsTelegram = !args.dryRun;
-  if (needsTelegram) {
+  if (!args.dryRun) {
     requireTelegramConfig();
   }
 
-  let feedbackResult = { feedbackCount: 0, updateCount: 0 };
-  if (!args.dryRun && args.last === null) {
-    feedbackResult = await processFeedbackUpdates(state, preferences, { eventsById });
-    if (feedbackResult.feedbackCount) {
-      await writePreferences(args.preferencesFile, preferences);
-    }
-  }
-
   const eventsToSend = filterDigestEvents(selectEventsToSend(events, state, args))
-    .sort((a, b) => compareDigestEvents(a, b, preferences));
+    .sort(compareDigestEvents);
 
   if (!eventsToSend.length) {
     console.log(args.last === null ? 'No new Telegram digest events to send.' : 'No events found for --last.');
-    if (!args.dryRun && args.last === null && feedbackResult.updateCount) {
-      await writeFile(args.stateFile, JSON.stringify(state, null, 2) + '\n', 'utf8');
-    }
     return;
   }
 
@@ -475,8 +377,6 @@ async function main() {
 
   if (shouldUpdateState) {
     await updateState(args.stateFile, state, eventsToSend, sentMessages);
-  } else if (feedbackResult.updateCount) {
-    await writeFile(args.stateFile, JSON.stringify(state, null, 2) + '\n', 'utf8');
   }
 
   const stateNote = shouldUpdateState ? 'state updated' : 'state unchanged';

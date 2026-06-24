@@ -3,7 +3,5 @@ materials/
 data/events.jsonl
 data/events.current.json
 data/state.json
-data/preferences.json
-data/reaction-test/
 .env
 npm-debug.log*
