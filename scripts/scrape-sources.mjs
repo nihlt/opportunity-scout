@@ -11,6 +11,7 @@ const registryPath = path.join(materialsDir, 'sources-registry.json');
 const douDetailsCachePath = path.join(materialsDir, 'dou-event-details-cache.json');
 const tagKeywordsPath = path.join(repoRoot, 'data', 'tag-keywords.json');
 const locationKeywordsPath = path.join(repoRoot, 'data', 'location-keywords.json');
+const douMaxPages = 50;
 
 const sources = [
   {
@@ -79,8 +80,29 @@ function hashText(value) {
   return createHash('sha256').update(cleanText(value), 'utf8').digest('hex').slice(0, 24);
 }
 
+function canonicalUrl(value) {
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    url.search = '';
+    if (!url.pathname.endsWith('/')) url.pathname += '/';
+    return url.href;
+  } catch {
+    return cleanText(value);
+  }
+}
+
 function douDetailCacheKey(event) {
+  if (event.link) return hashText(canonicalUrl(event.link));
   return hashText([event.title, event.date].map(cleanText).join('\n'));
+}
+
+function legacyDouDetailCacheKey(event) {
+  return hashText([event.title, event.date].map(cleanText).join('\n'));
+}
+
+function douEventKey(event) {
+  return canonicalUrl(event.link) || [event.title, event.link].map(cleanText).join('|');
 }
 
 function keywordRegex(keyword) {
@@ -466,6 +488,84 @@ async function scrapeDouCalendarList(page) {
   });
 }
 
+async function discoverDouCalendarPageUrls(page, sourceUrl) {
+  return page.evaluate(({ sourceUrl }) => {
+    const cleanUrl = (value) => {
+      const url = new URL(value, document.location.href);
+      url.hash = '';
+      url.search = '';
+      return url;
+    };
+    const source = cleanUrl(sourceUrl);
+    const tagMatch = source.pathname.match(/^\/calendar\/tags\/[^/]+\/(?:\d+\/)?$/);
+    const tagBasePath = tagMatch ? source.pathname.replace(/(?:\d+\/)?$/, '') : null;
+
+    const pageNumber = (pathname) => {
+      if (tagBasePath) {
+        if (pathname === tagBasePath) return 1;
+        const match = pathname.match(new RegExp(`^${tagBasePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\d+)/$`));
+        return match ? Number(match[1]) : null;
+      }
+
+      if (pathname === '/calendar/') return 1;
+      const match = pathname.match(/^\/calendar\/page-(\d+)\/$/);
+      return match ? Number(match[1]) : null;
+    };
+
+    const isSameCalendarSection = (url) => {
+      if (url.origin !== source.origin) return false;
+      if (tagBasePath) {
+        return url.pathname === tagBasePath || new RegExp(`^${tagBasePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\d+/$`).test(url.pathname);
+      }
+      return url.pathname === '/calendar/' || /^\/calendar\/page-\d+\/$/.test(url.pathname);
+    };
+
+    return [document.location.href, ...[...document.querySelectorAll('a[href]')].map((link) => link.href)]
+      .map(cleanUrl)
+      .filter(isSameCalendarSection)
+      .map((url) => ({
+        url: url.href,
+        pageNumber: pageNumber(url.pathname),
+      }))
+      .filter((item) => Number.isInteger(item.pageNumber) && item.pageNumber > 0);
+  }, { sourceUrl });
+}
+
+function mergeDouEvents(events) {
+  const byKey = new Map();
+
+  for (const event of events) {
+    const key = douEventKey(event);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, event);
+      continue;
+    }
+
+    byKey.set(key, {
+      ...existing,
+      description: existing.description || event.description,
+      location: existing.location || event.location,
+      payment: existing.payment || event.payment,
+      tags: uniqueStrings([...(existing.tags || []), ...(event.tags || [])]),
+      text: cleanText([existing.text, event.text].filter(Boolean).join('\n\n--- DUPLICATE LIST ITEM ---\n\n')),
+    });
+  }
+
+  return [...byKey.values()];
+}
+
+function uniqueLinks(links) {
+  const byKey = new Map();
+
+  for (const link of links) {
+    const key = `${cleanText(link.text)}|${cleanText(link.href)}`;
+    if (!byKey.has(key)) byKey.set(key, link);
+  }
+
+  return [...byKey.values()];
+}
+
 async function scrapeDouEventDetails(browser, event) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1800 } });
   await page.goto(event.link, { waitUntil: 'domcontentloaded', timeout: 60_000 });
@@ -631,14 +731,57 @@ async function scrapeDouEventDetails(browser, event) {
 }
 
 async function scrapeDouCalendar(browser, page, source) {
-  const listEvents = await scrapeDouCalendarList(page);
+  const queuedUrls = new Set([canonicalUrl(page.url())]);
+  const visitedUrls = new Set();
+  const queue = [page.url()];
+  const visibleTextParts = [];
+  const allLinks = [];
+  const allListEvents = [];
+
+  while (queue.length && visitedUrls.size < douMaxPages) {
+    const url = queue.shift();
+    const canonicalPageUrl = canonicalUrl(url);
+    if (visitedUrls.has(canonicalPageUrl)) continue;
+
+    const currentPage = visitedUrls.size === 0 ? page : await browser.newPage({ viewport: { width: 1440, height: 1400 } });
+    if (visitedUrls.size > 0) {
+      await currentPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      await currentPage.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
+    }
+
+    visitedUrls.add(canonicalPageUrl);
+
+    const [pageData, listEvents, discoveredPages] = await Promise.all([
+      scrapeVisibleTextAndLinks(currentPage),
+      scrapeDouCalendarList(currentPage),
+      discoverDouCalendarPageUrls(currentPage, source.url),
+    ]);
+
+    visibleTextParts.push(`PAGE: ${currentPage.url()}\n${cleanText(pageData.visibleText)}`);
+    allLinks.push(...pageData.links);
+    allListEvents.push(...listEvents);
+
+    for (const discovered of discoveredPages.sort((a, b) => a.pageNumber - b.pageNumber)) {
+      const canonicalDiscoveredUrl = canonicalUrl(discovered.url);
+      if (queuedUrls.has(canonicalDiscoveredUrl) || visitedUrls.has(canonicalDiscoveredUrl)) continue;
+      queuedUrls.add(canonicalDiscoveredUrl);
+      queue.push(discovered.url);
+    }
+
+    if (currentPage !== page) {
+      await currentPage.close();
+    }
+  }
+
+  const listEvents = mergeDouEvents(allListEvents);
   const cache = await readDouDetailsCache();
   let cacheChanged = false;
   const enrichedEvents = [];
 
   for (const event of listEvents) {
     const cacheKey = douDetailCacheKey(event);
-    let detail = cache.entries[cacheKey];
+    const legacyCacheKey = legacyDouDetailCacheKey(event);
+    let detail = cache.entries[cacheKey] || cache.entries[legacyCacheKey];
 
     if (!detail || !detail.calendar || /T000000%2F\d{8}T235959/.test(detail.calendar)) {
       detail = {
@@ -649,6 +792,9 @@ async function scrapeDouCalendar(browser, page, source) {
         cacheKey,
         scrapedAt: new Date().toISOString(),
       };
+      cache.entries[cacheKey] = detail;
+      cacheChanged = true;
+    } else if (!cache.entries[cacheKey]) {
       cache.entries[cacheKey] = detail;
       cacheChanged = true;
     }
@@ -679,7 +825,12 @@ async function scrapeDouCalendar(browser, page, source) {
     await writeDouDetailsCache(cache);
   }
 
-  return enrichedEvents;
+  return {
+    visibleText: visibleTextParts.join('\n\n--- DOU PAGE ---\n\n'),
+    links: uniqueLinks(allLinks),
+    rawEvents: enrichedEvents,
+    pageCount: visitedUrls.size,
+  };
 }
 
 async function scrapeKseNews(page) {
@@ -993,11 +1144,17 @@ async function scrapeSource(browser, source) {
     visibleText = kaggle.visibleText;
     links = kaggle.links;
     rawEvents = kaggle.rawEvents;
+  } else if (source.type === 'dou-calendar') {
+    const dou = await scrapeDouCalendar(browser, page, source);
+    visibleText = dou.visibleText;
+    links = dou.links;
+    rawEvents = dou.rawEvents;
+    extraMetadata = { pageCount: dou.pageCount };
   } else {
     const scrapedPage = await scrapeVisibleTextAndLinks(page);
     visibleText = scrapedPage.visibleText;
     links = scrapedPage.links;
-    rawEvents = source.type === 'dou-calendar' ? await scrapeDouCalendar(browser, page, source) : await scrapeKseNews(page);
+    rawEvents = await scrapeKseNews(page);
   }
 
   await page.close();

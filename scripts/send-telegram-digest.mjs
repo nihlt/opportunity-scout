@@ -69,14 +69,7 @@ async function readState(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'));
 }
 
-function isAiEvent(event) {
-  return (event.tags || []).some((tag) => tag.toLowerCase() === 'ai');
-}
-
 function compareDigestEvents(a, b) {
-  const aiDelta = Number(isAiEvent(b)) - Number(isAiEvent(a));
-  if (aiDelta) return aiDelta;
-
   const dateA = a.dateNormalized || '9999-99-99T99:99:99';
   const dateB = b.dateNormalized || '9999-99-99T99:99:99';
   return dateA.localeCompare(dateB) || a.title.localeCompare(b.title);
@@ -105,19 +98,22 @@ function escapeHtml(value) {
 }
 
 function hasMoneyPayment(event) {
-  return /(?:\p{Sc}\s?\d|\d[\d\s,]*(?:\u0433\u0440\u043d|uah|usd|eur|gbp|jpy|inr))/iu.test(event.payment || '');
+  return /(?:\p{Sc}\s?\d|\d[\d\s,]*(?:\p{Sc}|\u0433\u0440\u043d|uah|usd|eur|gbp|jpy|inr))/iu.test(event.payment || '');
 }
 
-function isPaidCourse(event) {
-  const tags = new Set((event.tags || []).map((tag) => tag.toLowerCase()));
-  if (!tags.has('\u043a\u0443\u0440\u0441\u0438')) return false;
+function hasFreePriceTier(event) {
+  return /(?:^|[^\d])0\s*(?:-|–|—|to)\s*\d/iu.test(event.payment || '');
+}
+
+function isPaidEvent(event) {
   if (!event.payment) return false;
   if (/\u0431\u0435\u0437\u043a\u043e\u0448\u0442\u043e\u0432|\u0431\u0435\u0437\u043e\u043f\u043b\u0430\u0442|free/i.test(event.payment)) return false;
+  if (hasFreePriceTier(event)) return false;
   return hasMoneyPayment(event);
 }
 
 function filterDigestEvents(events) {
-  return events.filter((event) => !isPaidCourse(event));
+  return events.filter((event) => !isPaidEvent(event));
 }
 
 function formatEvent(event, index) {
