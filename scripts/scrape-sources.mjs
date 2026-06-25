@@ -1,4 +1,5 @@
 import { chromium } from 'playwright';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 const materialsDir = path.join(repoRoot, 'materials');
 const registryPath = path.join(materialsDir, 'sources-registry.json');
+const douDetailsCachePath = path.join(materialsDir, 'dou-event-details-cache.json');
 const tagKeywordsPath = path.join(repoRoot, 'data', 'tag-keywords.json');
 const locationKeywordsPath = path.join(repoRoot, 'data', 'location-keywords.json');
 
@@ -17,6 +19,7 @@ const sources = [
     type: 'dou-calendar',
     url: 'https://dou.ua/calendar/tags/AI/',
     filesPrefix: 'dou-ai',
+    tags: ['AI'],
   },
   {
     id: 'dou-competitions',
@@ -24,6 +27,7 @@ const sources = [
     type: 'dou-calendar',
     url: 'https://dou.ua/calendar/tags/%D0%B7%D0%BC%D0%B0%D0%B3%D0%B0%D0%BD%D0%BD%D1%8F/',
     filesPrefix: 'dou-competitions',
+    tags: ['змагання'],
   },
   {
     id: 'dou-hackathons',
@@ -31,6 +35,7 @@ const sources = [
     type: 'dou-calendar',
     url: 'https://dou.ua/calendar/tags/%D1%85%D0%B0%D0%BA%D0%B0%D1%82%D0%BE%D0%BD/',
     filesPrefix: 'dou-hackathons',
+    tags: ['хакатон'],
   },
   {
     id: 'kse-university-news',
@@ -70,6 +75,14 @@ function uniqueStrings(values) {
   return [...new Set(values.map(cleanText).filter(Boolean))];
 }
 
+function hashText(value) {
+  return createHash('sha256').update(cleanText(value), 'utf8').digest('hex').slice(0, 24);
+}
+
+function douDetailCacheKey(event) {
+  return hashText([event.title, event.date].map(cleanText).join('\n'));
+}
+
 function keywordRegex(keyword) {
   const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (/^[a-z0-9 .+-]+$/i.test(keyword)) {
@@ -103,6 +116,30 @@ async function loadKeywordRules() {
     patterns: compileRulePatterns(rule),
   }));
   locationKeywordRules = JSON.parse(await readFile(locationKeywordsPath, 'utf8'));
+}
+
+async function readJson(filePath, fallback) {
+  try {
+    return JSON.parse(await readFile(filePath, 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return fallback;
+    throw error;
+  }
+}
+
+async function readDouDetailsCache() {
+  const cache = await readJson(douDetailsCachePath, { entries: {} });
+  return {
+    entries: cache && typeof cache.entries === 'object' && cache.entries ? cache.entries : {},
+  };
+}
+
+async function writeDouDetailsCache(cache) {
+  const output = {
+    updatedAt: new Date().toISOString(),
+    entries: cache.entries,
+  };
+  await writeFile(douDetailsCachePath, JSON.stringify(output, null, 2) + '\n', 'utf8');
 }
 
 function relative(filePath) {
@@ -330,6 +367,7 @@ function normalizeEvent(raw, options = {}) {
   return {
     title,
     link: raw.link || null,
+    calendar: cleanText(raw.calendar) || null,
     date: date || null,
     ...normalizedDate,
     description: description || null,
@@ -361,7 +399,7 @@ async function scrapeVisibleTextAndLinks(page) {
   });
 }
 
-async function scrapeDouCalendar(page) {
+async function scrapeDouCalendarList(page) {
   return page.evaluate(() => {
     const absolutize = (href) => {
       try {
@@ -426,6 +464,222 @@ async function scrapeDouCalendar(page) {
 
     return events;
   });
+}
+
+async function scrapeDouEventDetails(browser, event) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1800 } });
+  await page.goto(event.link, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
+
+  const detail = await page.evaluate(() => {
+    const clean = (value) =>
+      String(value ?? '')
+        .replace(/\u00a0/g, ' ')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
+    const absolutize = (href) => {
+      try {
+        return new URL(href, document.location.href).href;
+      } catch {
+        return href;
+      }
+    };
+
+    const parseWhenAndWhere = () => {
+      const block = document.querySelector('.when-and-where');
+      if (!block) return { date: '', location: '', payment: '' };
+
+      const date = block.querySelector('.date')?.innerText?.trim() || '';
+      const payment =
+        [...block.querySelectorAll('span')]
+          .filter((span) => !span.classList.contains('date'))
+          .map((span) => span.innerText.trim())
+          .filter(Boolean)
+          .join(' ') || '';
+      const location = [...block.childNodes]
+        .filter((child) => child.nodeType === Node.TEXT_NODE)
+        .map((child) => child.textContent.trim())
+        .filter(Boolean)
+        .join(' ');
+
+      return { date, location, payment };
+    };
+
+    const parseSchemaEvent = () => {
+      for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+        try {
+          const data = JSON.parse(script.textContent);
+          const items = Array.isArray(data) ? data : [data];
+          const event = items.find((item) => item?.['@type'] === 'Event');
+          if (event) return event;
+        } catch {
+          // Ignore unrelated structured data.
+        }
+      }
+      return null;
+    };
+
+    const parsePageDetails = () => {
+      const lines = clean(document.body.innerText)
+        .split('\n')
+        .map(clean)
+        .filter(Boolean);
+      const valueAfterLabel = (label) => {
+        const index = lines.findIndex((line) => line.toLowerCase() === label.toLowerCase());
+        return index >= 0 ? clean(lines[index + 1]) : '';
+      };
+
+      return {
+        date: valueAfterLabel('Date'),
+        time: valueAfterLabel('Time'),
+        place: valueAfterLabel('Place'),
+        price: valueAfterLabel('Price'),
+      };
+    };
+
+    const compactCalendarDate = (value, { time = '', endOfDay = false } = {}) => {
+      const text = clean(value);
+      const timeMatch = clean(time).match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+      const timePart = timeMatch
+        ? `${timeMatch[1].padStart(2, '0')}${timeMatch[2]}${timeMatch[3] || '00'}`
+        : endOfDay
+          ? '235959'
+          : '000000';
+
+      const dateOnly = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (dateOnly) return `${dateOnly[1]}${dateOnly[2]}${dateOnly[3]}T${timePart}`;
+
+      const dateTime = text.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
+      if (dateTime) {
+        return `${dateTime[1]}${dateTime[2]}${dateTime[3]}T${dateTime[4]}${dateTime[5]}${dateTime[6] || '00'}`;
+      }
+
+      return '';
+    };
+
+    const buildDouCalendarLink = (schemaEvent, pageDetails) => {
+      if (!schemaEvent?.startDate) return '';
+
+      const start = compactCalendarDate(schemaEvent.startDate, { time: pageDetails.time });
+      const end = schemaEvent.endDate
+        ? compactCalendarDate(schemaEvent.endDate, { time: pageDetails.time, endOfDay: !pageDetails.time })
+        : compactCalendarDate(schemaEvent.startDate, { time: pageDetails.time, endOfDay: !pageDetails.time });
+      if (!start || !end) return '';
+
+      const location =
+        clean(pageDetails.place) ||
+        clean(schemaEvent.location?.name) ||
+        clean(schemaEvent.location?.address?.streetAddress) ||
+        clean(schemaEvent.location?.address?.addressLocality);
+      const params = new URLSearchParams({
+        action: 'TEMPLATE',
+        text: clean(schemaEvent.name) || document.title.replace(/\s*\|.*$/, ''),
+        dates: `${start}/${end}`,
+        details: clean(schemaEvent.url) || document.location.href,
+        trp: 'false',
+        sprop: 'http://dou.ua',
+      });
+      params.append('sprop', 'name:DOU');
+      if (location) params.set('location', location);
+
+      return `https://www.google.com/calendar/event?${params.toString()}`;
+    };
+
+    const calendarLink = [...document.querySelectorAll('a.b-plus-calendar.__google[href], a[href]')]
+      .map((link) => ({
+        text: clean(link.innerText),
+        href: absolutize(link.getAttribute('href')),
+      }))
+      .find((link) =>
+        link.href.includes('google.com/calendar/event?action=TEMPLATE') ||
+        /google calendar/i.test(link.text) ||
+        link.href.includes('google.com/calendar/event') ||
+        link.href.includes('calendar.google.com/calendar/render'),
+      )?.href || '';
+    const schemaEvent = parseSchemaEvent();
+    const pageDetails = parsePageDetails();
+
+    const tags = [...document.querySelectorAll('a[href*="/calendar/tags/"], .tag')]
+      .map((tag) => clean(tag.innerText))
+      .filter(Boolean);
+    const description =
+      clean(document.querySelector('.b-typo')?.innerText) ||
+      clean(document.querySelector('meta[property="og:description"]')?.getAttribute('content')) ||
+      clean([...document.querySelectorAll('article p, main p, p')]
+        .map((node) => node.innerText)
+        .filter(Boolean)
+        .slice(0, 4)
+        .join('\n\n'));
+    const whenAndWhere = parseWhenAndWhere();
+    const visibleText = clean(document.body.innerText);
+
+    return {
+      visibleText,
+      calendar: calendarLink || buildDouCalendarLink(schemaEvent, pageDetails),
+      tags,
+      description,
+      date: whenAndWhere.date,
+      location: whenAndWhere.location || pageDetails.place,
+      payment: whenAndWhere.payment,
+    };
+  });
+
+  await page.close();
+  return detail;
+}
+
+async function scrapeDouCalendar(browser, page, source) {
+  const listEvents = await scrapeDouCalendarList(page);
+  const cache = await readDouDetailsCache();
+  let cacheChanged = false;
+  const enrichedEvents = [];
+
+  for (const event of listEvents) {
+    const cacheKey = douDetailCacheKey(event);
+    let detail = cache.entries[cacheKey];
+
+    if (!detail || !detail.calendar || /T000000%2F\d{8}T235959/.test(detail.calendar)) {
+      detail = {
+        ...(await scrapeDouEventDetails(browser, event)),
+        title: event.title,
+        date: event.date,
+        link: event.link,
+        cacheKey,
+        scrapedAt: new Date().toISOString(),
+      };
+      cache.entries[cacheKey] = detail;
+      cacheChanged = true;
+    }
+
+    const detailText = cleanText(detail.visibleText);
+    const tags = uniqueStrings([
+      ...(source.tags || []),
+      ...(event.tags || []),
+      ...(detail.tags || []),
+      ...tagsFromKeywords(detailText),
+    ]);
+
+    enrichedEvents.push({
+      ...event,
+      date: cleanText(detail.date) || event.date,
+      description: cleanText(detail.description) || event.description,
+      location: cleanText(detail.location) || event.location,
+      payment: cleanText(detail.payment) || event.payment,
+      calendar: cleanText(detail.calendar) || null,
+      tags,
+      text: cleanText([event.text, detailText].filter(Boolean).join('\n\n--- DETAIL PAGE ---\n\n')),
+      detailCacheKey: cacheKey,
+      detailScrapedAt: detail.scrapedAt || null,
+    });
+  }
+
+  if (cacheChanged) {
+    await writeDouDetailsCache(cache);
+  }
+
+  return enrichedEvents;
 }
 
 async function scrapeKseNews(page) {
@@ -743,7 +997,7 @@ async function scrapeSource(browser, source) {
     const scrapedPage = await scrapeVisibleTextAndLinks(page);
     visibleText = scrapedPage.visibleText;
     links = scrapedPage.links;
-    rawEvents = source.type === 'dou-calendar' ? await scrapeDouCalendar(page) : await scrapeKseNews(page);
+    rawEvents = source.type === 'dou-calendar' ? await scrapeDouCalendar(browser, page, source) : await scrapeKseNews(page);
   }
 
   await page.close();

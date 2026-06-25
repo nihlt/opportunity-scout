@@ -26,6 +26,14 @@ function stableId(sourceId, link, title) {
     .slice(0, 24);
 }
 
+function eventId(source, link, title) {
+  if (source.type === 'dou-calendar') {
+    return stableId('dou-calendar', link, '');
+  }
+
+  return stableId(source.id, link, title);
+}
+
 function contentHash(event) {
   const comparable = {
     title: event.title,
@@ -38,6 +46,7 @@ function contentHash(event) {
     location: event.location,
     payment: event.payment,
     tags: event.tags,
+    calendar: event.calendar,
     sourceId: event.sourceId,
   };
 
@@ -164,7 +173,7 @@ async function readEventsJsonl() {
 function normalizeEvent(source, sourceEvent, index, observedAt) {
   const title = cleanText(sourceEvent.title);
   const link = cleanText(sourceEvent.link);
-  const id = stableId(source.id, link, title);
+  const id = eventId(source, link, title);
 
   const normalized = {
     id,
@@ -184,6 +193,9 @@ function normalizeEvent(source, sourceEvent, index, observedAt) {
     sourceName: source.name,
     sourceType: source.type,
     sourceUrl: source.url,
+    sourceIds: [source.id],
+    sourceNames: [source.name],
+    sourceUrls: [source.url],
     sourceEventFile: source.files.events,
     sourceEventIndex: index,
     firstSeenAt: observedAt,
@@ -192,8 +204,35 @@ function normalizeEvent(source, sourceEvent, index, observedAt) {
 
   return {
     ...normalized,
-    calendar: buildCalendarLink(normalized),
+    calendar: cleanText(sourceEvent.calendar) || buildCalendarLink(normalized),
   };
+}
+
+function mergeUnique(values) {
+  return [...new Set(values.map(cleanText).filter(Boolean))];
+}
+
+function mergeEvents(existing, incoming) {
+  const merged = {
+    ...existing,
+    description: existing.description || incoming.description,
+    location: existing.location || incoming.location,
+    payment: existing.payment || incoming.payment,
+    calendar: existing.calendar || incoming.calendar,
+    tags: mergeUnique([...(existing.tags || []), ...(incoming.tags || [])]),
+    sourceIds: mergeUnique([...(existing.sourceIds || [existing.sourceId]), ...(incoming.sourceIds || [incoming.sourceId])]),
+    sourceNames: mergeUnique([
+      ...(existing.sourceNames || [existing.sourceName]),
+      ...(incoming.sourceNames || [incoming.sourceName]),
+    ]),
+    sourceUrls: mergeUnique([...(existing.sourceUrls || [existing.sourceUrl]), ...(incoming.sourceUrls || [incoming.sourceUrl])]),
+  };
+
+  merged.sourceId = merged.sourceIds.join(', ');
+  merged.sourceName = merged.sourceNames.join(' / ');
+  merged.sourceUrl = merged.sourceUrls[0] || existing.sourceUrl;
+
+  return merged;
 }
 
 function compareEvents(a, b) {
@@ -211,7 +250,7 @@ async function main() {
   const registry = await readJson(registryPath, { sources: [] });
   const previousEvents = await readEventsJsonl();
   const previousById = new Map(previousEvents.map((event) => [event.id, event]));
-  const currentEvents = [];
+  const currentById = new Map();
   const sourceStats = [];
 
   for (const source of registry.sources || []) {
@@ -227,7 +266,8 @@ async function main() {
       }
       normalized.lastSeenAt = observedAt;
       normalized.contentHash = contentHash(normalized);
-      currentEvents.push(normalized);
+      const existing = currentById.get(normalized.id);
+      currentById.set(normalized.id, existing ? mergeEvents(existing, normalized) : normalized);
       count += 1;
     }
 
@@ -240,6 +280,10 @@ async function main() {
     });
   }
 
+  const currentEvents = [...currentById.values()];
+  for (const event of currentEvents) {
+    event.contentHash = contentHash(event);
+  }
   currentEvents.sort(compareEvents);
 
   const previousHashes = new Map(previousEvents.map((event) => [event.id, event.contentHash]));
