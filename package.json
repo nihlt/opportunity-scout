@@ -16,6 +16,7 @@
     "review:html": "node scripts/build-review-html.mjs",
     "digest:dry": "node scripts/send-telegram-digest.mjs --dry-run",
     "digest": "node scripts/send-telegram-digest.mjs",
+    "bot": "node scripts/telegram-bot.mjs",
     "daily": "npm run collect && npm run digest"
   },
   "dependencies": {
