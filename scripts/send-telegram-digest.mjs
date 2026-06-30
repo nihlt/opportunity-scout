@@ -1,6 +1,9 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { filterDigestEvents } from '../lib/digest-filters.mjs';
+import { loadUserConfig } from '../lib/user-config.mjs';
+import { appendUserHistory } from '../lib/user-history.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -17,6 +20,8 @@ function parseArgs(argv) {
     envFile: path.join(repoRoot, '.env'),
     eventsFile: defaultEventsPath,
     stateFile: defaultStatePath,
+    chatId: null,
+    userConfig: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -27,6 +32,8 @@ function parseArgs(argv) {
     else if (arg === '--env-file') args.envFile = path.resolve(repoRoot, argv[++index]);
     else if (arg === '--events-file') args.eventsFile = path.resolve(repoRoot, argv[++index]);
     else if (arg === '--state-file') args.stateFile = path.resolve(repoRoot, argv[++index]);
+    else if (arg === '--chat-id') args.chatId = argv[++index];
+    else if (arg === '--user-config') args.userConfig = path.resolve(repoRoot, argv[++index]);
   }
 
   if (args.last !== null && (!Number.isInteger(args.last) || args.last <= 0)) {
@@ -86,7 +93,7 @@ function formatDate(event) {
   if (event.datePrecision === 'date_range' && event.dateNormalized && event.dateEndNormalized) {
     return `${event.dateNormalized} - ${event.dateEndNormalized}`;
   }
-  return event.dateNormalized || event.date || '—';
+  return event.dateNormalized || event.date || '-';
 }
 
 function escapeHtml(value) {
@@ -95,25 +102,6 @@ function escapeHtml(value) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
-}
-
-function hasMoneyPayment(event) {
-  return /(?:\p{Sc}\s?\d|\d[\d\s,]*(?:\p{Sc}|\u0433\u0440\u043d|uah|usd|eur|gbp|jpy|inr))/iu.test(event.payment || '');
-}
-
-function hasFreePriceTier(event) {
-  return /(?:^|[^\d])0\s*(?:-|–|—|to)\s*\d/iu.test(event.payment || '');
-}
-
-function isPaidEvent(event) {
-  if (!event.payment) return false;
-  if (/\u0431\u0435\u0437\u043a\u043e\u0448\u0442\u043e\u0432|\u0431\u0435\u0437\u043e\u043f\u043b\u0430\u0442|free/i.test(event.payment)) return false;
-  if (hasFreePriceTier(event)) return false;
-  return hasMoneyPayment(event);
-}
-
-function filterDigestEvents(events) {
-  return events.filter((event) => !isPaidEvent(event));
 }
 
 function formatEvent(event, index) {
@@ -153,11 +141,15 @@ function pendingEvents(events, state) {
   const eventsById = new Map(events.map((event) => [event.id, event]));
   const newIds = Array.isArray(state.lastChanges?.newEventIds) ? state.lastChanges.newEventIds : [];
   const sentIds = new Set(Array.isArray(state.sentTelegramEventIds) ? state.sentTelegramEventIds : []);
+  const alreadySent = newIds.filter((id) => sentIds.has(id)).length;
 
-  return newIds
-    .filter((id) => !sentIds.has(id))
-    .map((id) => eventsById.get(id))
-    .filter(Boolean);
+  return {
+    events: newIds
+      .filter((id) => !sentIds.has(id))
+      .map((id) => eventsById.get(id))
+      .filter(Boolean),
+    alreadySent,
+  };
 }
 
 function lastEvents(events, count) {
@@ -165,14 +157,13 @@ function lastEvents(events, count) {
 }
 
 function selectEventsToSend(events, state, args) {
-  if (args.last !== null) return lastEvents(events, args.last);
+  if (args.last !== null) return { events: lastEvents(events, args.last), alreadySent: 0 };
   return pendingEvents(events, state);
 }
 
 function requireTelegramConfig() {
   const missing = [];
   if (!process.env.TELEGRAM_BOT_TOKEN) missing.push('TELEGRAM_BOT_TOKEN');
-  if (!process.env.TELEGRAM_CHAT_ID) missing.push('TELEGRAM_CHAT_ID');
   if (missing.length) {
     throw new Error(`Missing Telegram env var(s): ${missing.join(', ')}`);
   }
@@ -199,9 +190,9 @@ async function callTelegram(method, payload) {
   return response.json();
 }
 
-async function sendTelegramMessage(text) {
+async function sendTelegramMessage(chatId, text) {
   const payload = await callTelegram('sendMessage', {
-    chat_id: process.env.TELEGRAM_CHAT_ID,
+    chat_id: chatId,
     text,
     parse_mode: 'HTML',
     disable_web_page_preview: true,
@@ -225,22 +216,44 @@ async function updateState(filePath, state, sentEvents, sentMessages) {
   await writeFile(filePath, JSON.stringify(nextState, null, 2) + '\n', 'utf8');
 }
 
+async function writeDigestHistory(chatId, args, eventsToSend, filteredCounters, messageCount) {
+  await appendUserHistory(chatId, {
+    type: args.dryRun ? 'digest.dry_run' : 'digest.sent',
+    dryRun: args.dryRun,
+    selectedEventIds: eventsToSend.map((event) => event.id),
+    filteredOut: filteredCounters,
+    messageCount,
+  });
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   await loadEnvFile(args.envFile);
 
+  const chatId = args.chatId || process.env.TELEGRAM_CHAT_ID;
+  if (!chatId) {
+    throw new Error('Missing chat id: pass --chat-id or set TELEGRAM_CHAT_ID');
+  }
+
   const events = await readEvents(args.eventsFile);
   const state = await readState(args.stateFile);
+  const { config } = await loadUserConfig({
+    chatId,
+    configPath: args.userConfig,
+  });
 
   if (!args.dryRun) {
     requireTelegramConfig();
   }
 
-  const eventsToSend = filterDigestEvents(selectEventsToSend(events, state, args))
-    .sort(compareDigestEvents);
+  const selected = selectEventsToSend(events, state, args);
+  const filtered = filterDigestEvents(selected.events, config);
+  filtered.counters.alreadySent = selected.alreadySent;
+  const eventsToSend = filtered.events.sort(compareDigestEvents);
 
   if (!eventsToSend.length) {
     console.log(args.last === null ? 'No new Telegram digest events to send.' : 'No events found for --last.');
+    await writeDigestHistory(chatId, args, eventsToSend, filtered.counters, 0);
     return;
   }
 
@@ -255,13 +268,14 @@ async function main() {
     for (const [index, message] of messages.entries()) {
       console.log(`\n--- Message ${index + 1}/${messages.length} ---\n${message}`);
     }
+    await writeDigestHistory(chatId, args, eventsToSend, filtered.counters, messages.length);
     return;
   }
 
   const sentMessages = [];
   let eventOffset = 0;
   for (const message of messages) {
-    const sentMessage = await sendTelegramMessage(message);
+    const sentMessage = await sendTelegramMessage(chatId, message);
     const eventCountInMessage = (message.match(/(?:^|\n)\d+\. <a href=/g) || []).length;
     const messageEvents = eventsToSend
       .slice(eventOffset, eventOffset + eventCountInMessage)
@@ -281,6 +295,7 @@ async function main() {
     await updateState(args.stateFile, state, eventsToSend, sentMessages);
   }
 
+  await writeDigestHistory(chatId, args, eventsToSend, filtered.counters, messages.length);
   const stateNote = shouldUpdateState ? 'state updated' : 'state unchanged';
   console.log(`Sent Telegram digest: ${eventsToSend.length} event(s), ${messages.length} message(s), ${stateNote}.`);
 }

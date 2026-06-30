@@ -3,5 +3,6 @@ materials/
 data/events.jsonl
 data/events.current.json
 data/state.json
+data/users/
 .env
 npm-debug.log*
