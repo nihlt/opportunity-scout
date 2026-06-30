@@ -1,13 +1,6 @@
 {
-  "enabledSources": [
-    "dou-ai",
-    "dou-hackathons",
-    "dou-competitions",
-    "ain-opportunities-week",
-    "kaggle-competitions",
-    "kse-university-news"
-  ],
-  "includeTags": ["AI", "NLP", "internship", "олімпіада"],
+  "enabledSources": [],
+  "includeTags": [],
   "excludeTags": [],
   "paymentMode": "free-or-free-tier"
 }

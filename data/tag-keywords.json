@@ -1,24 +1,21 @@
 [
   {
     "tag": "AI",
+    "tokens": ["AI", "ШІ"],
     "patterns": [
-      "(?<![\\p{L}\\p{N}_])AI(?![\\p{L}\\p{N}_])",
-      "(?<![\\p{L}\\p{N}_])ШІ(?![\\p{L}\\p{N}_])",
       "artificial\\s+intelligence",
       "штучн\\p{L}*\\s+інтелект\\p{L}*"
     ]
   },
   {
     "tag": "NLP",
-    "patterns": [
-      "(?<![\\p{L}\\p{N}_])NLP(?![\\p{L}\\p{N}_])",
-      "natural\\s+language\\s+processing"
-    ]
+    "tokens": ["NLP"],
+    "patterns": ["natural\\s+language\\s+processing"]
   },
   {
     "tag": "internship",
+    "tokens": ["internship"],
     "patterns": [
-      "(?<![\\p{L}\\p{N}_])internship(?![\\p{L}\\p{N}_])",
       "стажуван\\p{L}*",
       "інтернатур\\p{L}*",
       "інтерншип\\p{L}*"
@@ -26,9 +23,7 @@
   },
   {
     "tag": "олімпіада",
-    "patterns": [
-      "олімпіад\\p{L}*",
-      "(?<![\\p{L}\\p{N}_])olympiad(?![\\p{L}\\p{N}_])"
-    ]
+    "tokens": ["olympiad"],
+    "patterns": ["олімпіад\\p{L}*"]
   }
 ]
